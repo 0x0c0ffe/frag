@@ -4,6 +4,7 @@ import
     ../assets/asset,
     ../math/rectangle,
     ../graphics/camera,
+    ../graphics/two_d/animation,
     ../graphics/two_d/spritebatch,
     ../graphics/two_d/texture_region,
     ../maps/tiled_map
@@ -31,6 +32,8 @@ type
         # TODO: move this to a component, and add layer support
         drawables: seq[Drawable]
 
+        Update: EventHandler
+
     UpdateEventArgs* = object of EventArgs
         deltaTime*: float
 
@@ -47,7 +50,15 @@ type
         aabbDirty: bool
 
     SpriteComponent* = ref object of Drawable
-        source*: TextureRegion
+        source: TextureRegion
+
+    AnimatedSpriteComponent* = ref object of Drawable
+        source: Animation
+        time: float
+        playing: bool
+        currentSprite: TextureRegion
+
+        updateCallback: proc (e: EventArgs) {.closure.}
 
     TiledMapComponent* = ref object of Drawable
         source: TiledMap
@@ -210,7 +221,9 @@ proc newScene*(eventEmitter: EventEmitter): Scene =
         rootNode: newNode(),
         eventEmitter: eventEmitter,
 
-        drawables: @[]
+        drawables: @[],
+
+        Update: initEventHandler("Update")
     )
 
     scene.rootNode.scene = scene
@@ -224,7 +237,7 @@ proc eventEmitter*(self: Scene): EventEmitter =
 
 proc update*(self: Scene, deltaTime: float) =
 
-    self.eventEmitter.emit("Update", UpdateEventArgs(
+    self.eventEmitter.emit(self.Update, UpdateEventArgs(
         deltaTime: deltaTime
     ))
 
@@ -254,12 +267,18 @@ proc updateAabb(self: Drawable) =
     let offset = absolutePosition(self.node)
     self.aabb.translate(offset.x, offset.y)
 
-method didAttach*(self: Drawable) =
+proc drawableDidAttach*(self: Drawable) =
     self.markAabbDirty()
     self.scene.drawables.add(self)
 
-method willDetach*(self: Drawable) =
+proc drawableWillDetach*(self: Drawable) =
     self.scene.drawables.delete(self.scene.drawables.find(self))
+
+method didAttach*(self: Drawable) =
+    self.drawableDidAttach()
+
+method willDetach*(self: Drawable) =
+    self.drawableWillDetach()
 
 method nodeMarkedDirty*(self: Drawable) =
     self.markAabbDirty()
@@ -285,6 +304,13 @@ proc render*(self: Scene, batch: SpriteBatch, camera: Camera) =
 
 proc newSpriteComponent*(): SpriteComponent =
     return SpriteComponent()
+
+proc source*(self: SpriteComponent): TextureRegion =
+    return self.source
+
+proc `source=`*(self: SpriteComponent, value: TextureRegion) =
+    self.source = value
+    self.markAabbDirty()
 
 method calcAabb*(self: SpriteComponent): Rectangle =
 
@@ -342,3 +368,83 @@ method render*(self: TiledMapComponent, context: RenderContext) =
     self.source.render(context.batch, context.camera)
 
     context.batch.begin()
+
+proc newAnimatedSpriteComponent*(): AnimatedSpriteComponent =
+    return AnimatedSpriteComponent()
+
+proc hasSource(self: AnimatedSpriteComponent): bool =
+    return len(self.source.frames) > 0
+
+proc updateCurrentSprite(self: AnimatedSpriteComponent) =
+
+    let next = if self.hasSource: self.source.getFrame(self.time) else: nil
+
+    if self.currentSprite != next:
+        self.currentSprite = next
+        self.markAabbDirty()
+
+proc reset*(self: AnimatedSpriteComponent) =
+    self.time = 0
+    self.updateCurrentSprite()
+
+proc advance(self: AnimatedSpriteComponent, deltaTime: float) =
+    self.time += deltaTime
+    self.updateCurrentSprite()
+
+proc play*(self: AnimatedSpriteComponent) =
+    self.playing = true
+
+proc play*(self: AnimatedSpriteComponent, value: Animation) =
+    self.source = value
+    self.playing = true
+    self.reset()
+
+proc pause*(self: AnimatedSpriteComponent) =
+    self.playing = false
+
+proc source*(self: AnimatedSpriteComponent): Animation =
+    return self.source
+
+proc `source=`*(self: AnimatedSpriteComponent, value: Animation) =
+    self.source = value
+    self.reset()
+
+method didAttach*(self: AnimatedSpriteComponent) =
+
+    proc onUpdate(e: EventArgs) =
+
+        if self.playing: 
+            self.advance(UpdateEventArgs(e).deltaTime)
+
+    self.updateCallback = onUpdate
+    self.scene.Update.addHandler(onUpdate)
+
+    # call common Drawable implementation
+    drawableDidAttach(self)
+
+method willDetach*(self: AnimatedSpriteComponent) =
+
+    # call common Drawable implementation
+    self.drawableWillDetach()
+
+    self.scene.Update.removeHandler(self.updateCallback)
+
+method calcAabb*(self: AnimatedSpriteComponent): Rectangle =
+
+    if self.currentSprite == nil:
+        return
+
+    return Rectangle(
+        x: 0, y: 0,
+        width: float self.currentSprite.regionWidth,
+        height: float self.currentSprite.regionHeight
+    )
+
+method render*(self: AnimatedSpriteComponent, context: RenderContext) =
+
+    if self.currentSprite == nil:
+        return
+
+    let position = absolutePosition(self.node)
+
+    context.batch.drawRegion(self.currentSprite, position.x, position.y)
